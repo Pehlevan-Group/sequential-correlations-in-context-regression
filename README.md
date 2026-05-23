@@ -1,6 +1,6 @@
 # Sequential Correlations Change In-Context Learning
 
-This respository contains all code needed to reproduce figures and experiments for our upcoming paper "Sequential Correlations Change In-Context Learning: \\ Effective Context Length and Architectural Mismatch" from _Mary Letey, Yue M. Lu, Cengiz Pehlevan, and Jacob Zavatone-Veth._ Paper to be released shortly.
+This respository contains all code needed to reproduce figures and experiments for our upcoming paper "Sequential Correlations Change In-Context Learning: Effective Context Length and Architectural Mismatch" from _Mary Letey, Yue M. Lu, Cengiz Pehlevan, and Jacob Zavatone-Veth._ Paper to be released shortly.
 
 ## Repo organisation
 This repository will be organised as follows
