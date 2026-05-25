@@ -11,15 +11,13 @@ This repository will be organised as follows
 
 ## Environment
 
-This repository uses [`uv`](https://docs.astral.sh/uv/) to create a Python environment from `pyproject.toml`. The code was scanned for Python and notebook imports; the environment includes `jax`, `numpy`, `matplotlib`, `optax`, and Jupyter kernel support.
-
-Install `uv` if it is not already available:
+This repository uses [`uv`](https://docs.astral.sh/uv/) to create a Python environment. Install `uv` if it is not already available:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-From the repository root, create the environment with NVIDIA GPU support. The command below names the environment directory `corr-lin-icl-env`:
+Create the environment with NVIDIA GPU support. The command below names the environment directory `corr-lin-icl-env` (rename however you'd like).
 
 ```bash
 uv python install 3.11
@@ -27,9 +25,7 @@ UV_PROJECT_ENVIRONMENT=corr-lin-icl-env uv sync --extra cuda12
 source corr-lin-icl-env/bin/activate
 ```
 
-Use `--extra cuda13` instead of `--extra cuda12` if your machine has a new enough NVIDIA driver for CUDA 13. As of May 2026, the JAX docs list Linux driver >=525 for CUDA 12 and >=580 for CUDA 13. If you are on a cluster where CUDA and cuDNN are provided by modules rather than Python wheels, use `--extra local-cuda12` or `--extra local-cuda13` instead. See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html#nvidia-gpu) for the current CUDA/driver compatibility details.
-
-For CPU-only local development, omit the CUDA extra:
+You can use `--extra cuda13` instead of `--extra cuda12` if your machine has a new enough NVIDIA driver for CUDA 13. For CPU-only local development, omit the CUDA extra:
 
 ```bash
 UV_PROJECT_ENVIRONMENT=corr-lin-icl-env uv sync
@@ -41,7 +37,6 @@ After activating the environment, check that JAX sees the expected device:
 ```bash
 python - <<'PY'
 import jax
-
 print(jax.devices())
 PY
 ```
