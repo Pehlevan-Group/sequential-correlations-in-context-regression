@@ -1,0 +1,31 @@
+[project]
+name = "sequential-correlations-in-context-regression"
+version = "0.1.0"
+description = "Code for sequential correlations in in-context regression experiments."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ipykernel>=6.29",
+    "jax>=0.6.0",
+    "jupyterlab>=4.2",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "optax>=0.2.4",
+]
+
+[project.optional-dependencies]
+cuda12 = [
+    "jax[cuda12]>=0.6.0",
+]
+cuda13 = [
+    "jax[cuda13]>=0.6.0",
+]
+local-cuda12 = [
+    "jax[cuda12-local]>=0.6.0",
+]
+local-cuda13 = [
+    "jax[cuda13-local]>=0.6.0",
+]
+
+[tool.uv]
+package = false
