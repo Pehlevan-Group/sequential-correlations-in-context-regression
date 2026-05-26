@@ -1,20 +1,42 @@
 import argparse
+import csv
+import json
 import math
+import sys
 import warnings
 from collections import defaultdict
 from pathlib import Path
 
-from effective_compare import (
-    EMPIRICAL_FILL_ALPHA,
-    MODEL_TITLES,
-    SPINE_COLOR,
-    best_fresh_test_loss_from_row,
-    compute_theory_curves,
-    load_rows,
-    mean_and_std,
-    p128_corr_len,
-    parse_bool,
-)
+SCRIPT_DIR = Path(__file__).resolve().parent
+THEORY_BASE_DIR = SCRIPT_DIR.parents[1] / "theory_base"
+if THEORY_BASE_DIR.exists() and str(THEORY_BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(THEORY_BASE_DIR))
+
+CORR0_PTR_TO_CORR_LEN = {
+    128: 0,
+    98: 1,
+    60: 2,
+    42: 3,
+    32: 4,
+    26: 5,
+    22: 6,
+    19: 7,
+    17: 8,
+    15: 9,
+    14: 10,
+}
+CORR_LEN_TO_PTR = {corr_len: p_tr for p_tr, corr_len in CORR0_PTR_TO_CORR_LEN.items()}
+
+MODEL_TITLES = {
+    "4": "Full-Parameter linear attention",
+    "5": "Softmax attention",
+    "9": "Softmax attention with MLP",
+}
+
+SPINE_COLOR = "#A1AAB5"
+AXES_FACE_COLOR = "#F7F7F7"
+GRID_COLOR = "white"
+EMPIRICAL_FILL_ALPHA = 0.32
 
 
 def parse_args():
@@ -25,10 +47,10 @@ def parse_args():
         )
     )
     parser.add_argument(
-        "--p128_csv",
+        "--corr_csv",
         type=str,
         default="saved_data/p128_corrlen_sweep.csv",
-        help="Path to the fixed-P_tr corr_len sweep CSV.",
+        help="Path to the correlated-token sweep CSV.",
     )
     parser.add_argument(
         "--reduced_csv",
@@ -39,22 +61,99 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=str,
-        default="plots/delta_query.png",
+        default="plots/delta_query.pdf",
         help="Output image path.",
     )
-    parser.add_argument(
-        "--model_type",
-        type=int,
-        nargs="*",
-        default=None,
-        help="Optional model_type values from the p128 CSV to plot. Default plots all present.",
-    )
-    parser.add_argument(
-        "--theory",
-        action="store_true",
-        help="Overlay the reduced-parameter linear-attention theory delta.",
-    )
     return parser.parse_args()
+
+
+def load_rows(csv_path):
+    csv.field_size_limit(sys.maxsize)
+    with open(csv_path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def configure_plot_style(matplotlib):
+    matplotlib.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["DejaVu Serif"],
+            "mathtext.fontset": "dejavuserif",
+            "axes.unicode_minus": False,
+            "axes.formatter.use_mathtext": True,
+            "legend.fontsize": 12,
+        }
+    )
+
+
+def best_fresh_test_loss_from_row(row):
+    fresh_test_losses = json.loads(row.get("fresh_test_losses_json", "[]"))
+    if fresh_test_losses:
+        return min(float(loss) for loss in fresh_test_losses)
+
+    best_loss = row.get("best_fresh_test_loss")
+    if best_loss in (None, ""):
+        raise ValueError("Row is missing both fresh_test_losses_json and best_fresh_test_loss")
+    return float(best_loss)
+
+
+def mean_and_std(values):
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return mean, math.sqrt(variance)
+
+
+def parse_bool(value):
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def corr_len_from_row(row):
+    return int(round(float(row["corr_len"])))
+
+
+def compute_theory_curves(x_values, theory_params):
+    try:
+        from theory import icl_correlated_REARRANGED, icl_uncorrelated, kernel_exp
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Theory overlays require the dependencies needed by theory.py. "
+            "Install them in the active Python environment and rerun plot_delta_query.py."
+        ) from exc
+
+    B = theory_params["B"]
+    d = theory_params["d"]
+    correlated_p_tr = theory_params["P_tr"]
+    K = theory_params["K"]
+    rho = theory_params["rho"]
+
+    tau = B / (d ** 2)
+    kappa = K / d
+    correlated_alpha = correlated_p_tr / d
+
+    no_query_values = []
+    effective_values = []
+    full_values = []
+    for corr in x_values:
+        if corr not in CORR_LEN_TO_PTR:
+            raise ValueError(
+                f"Missing effective-sample-size P_tr mapping for corr_len={corr}. "
+                f"Known corr_len values: {sorted(CORR_LEN_TO_PTR)}"
+            )
+        effective_p_tr = CORR_LEN_TO_PTR[corr]
+        effective_alpha = effective_p_tr / d
+
+        corrmatrix = kernel_exp(int(correlated_p_tr), corr)
+        no_query, tail = icl_correlated_REARRANGED(tau, correlated_alpha, kappa, rho, corrmatrix)
+        effective = icl_uncorrelated(tau, effective_alpha, effective_alpha, kappa, rho, 1, 1)
+        no_query_values.append(no_query)
+        effective_values.append(effective)
+        full_values.append(no_query + tail)
+
+    return {
+        "no_query": (x_values, no_query_values),
+        "effective": (x_values, effective_values),
+        "full": (x_values, full_values),
+    }
 
 
 def hex_to_rgb(color):
@@ -78,13 +177,13 @@ def interpolate_color(left, right, weight):
 
 
 LOCAL_CURVE_STYLES = {
-    "linear_reduced": "#7B2CBF",
-    "linear_full": "#5E60CE",
+    "linear_reduced": "#7A3FE3",  # purple, close to current but cleaner/brighter
+    "linear_full": "#5E6DE6",     # blue-violet, more cohesive with purple
 }
 SOFTMAX_COLORS = [
-    "#2A9D8F",
-    "#2A9D65",
-    "#176F64",
+    "#36B6D0",  # Softmax: cyan from your cohesive palette
+    "#0DA190",  # Softmax+MLP: darker teal for contrast
+    "#3FBE73",  # Softmax+MLP x 4: green from your cohesive palette
     "#62B064",
     "#1E8A7F",
     "#3F8F46",
@@ -96,10 +195,10 @@ SOFTMAX_COLOR_BY_ARCHITECTURE = {
 }
 
 BASE_ARCHITECTURE_LABELS = {
-    "reduced": "Reduced-param linear attention",
-    "4": "Linear attention",
-    "5": "Softmax att",
-    "9": "Softmax + MLP",
+    "reduced": "Reduced LA",
+    "4": "Full LA",
+    "5": "Softmax",
+    "9": "Softmax+MLP",
 }
 
 BASE_DELTA_STYLES = {
@@ -130,7 +229,7 @@ def architecture_label(series_key):
     label = BASE_ARCHITECTURE_LABELS.get(model_type, MODEL_TITLES.get(model_type, f"model_type={model_type}"))
     if layer == 1:
         return label
-    return f"{label}, {layer} layers"
+    return f"{label} x{layer}"
 
 
 def architecture_sort_key(series_key):
@@ -270,10 +369,10 @@ def reduced_corr_len(row):
     return int(round(float(row.get("plot_corr_len", row["corr_len"]))))
 
 
-def infer_theory_params(p128_csv):
-    rows = load_rows(Path(p128_csv))
+def infer_theory_params(corr_csv):
+    rows = load_rows(Path(corr_csv))
     if not rows:
-        raise ValueError(f"No rows found in {p128_csv}")
+        raise ValueError(f"No rows found in {corr_csv}")
 
     preferred_rows = [
         row
@@ -302,29 +401,21 @@ def compute_theory_delta_query(x_values, theory_params):
     ]
 
 
-def load_delta_query_data(p128_csv, reduced_csv, selected_model_types=None):
-    p128_rows = load_rows(Path(p128_csv))
+def load_delta_query_data(corr_csv, reduced_csv):
+    corr_rows = load_rows(Path(corr_csv))
     reduced_rows = load_rows(Path(reduced_csv))
 
-    allowed_model_types = None
-    if selected_model_types is not None:
-        allowed_model_types = {str(model_type) for model_type in selected_model_types}
-
-    p128_rows_by_architecture = defaultdict(list)
-    for row in p128_rows:
+    corr_rows_by_architecture = defaultdict(list)
+    for row in corr_rows:
         model_type = row["model_type"]
         layer = parse_layer(row)
         if model_type == "4" and layer > 1:
             continue
-        if allowed_model_types is not None and model_type not in allowed_model_types:
-            continue
         architecture_key = (model_type, layer)
-        p128_rows_by_architecture[architecture_key].append(row)
+        corr_rows_by_architecture[architecture_key].append(row)
 
-    if not p128_rows_by_architecture:
-        if selected_model_types is None:
-            raise ValueError(f"No rows found in {p128_csv}")
-        raise ValueError(f"No rows found for model_type values {sorted(selected_model_types)} in {p128_csv}")
+    if not corr_rows_by_architecture:
+        raise ValueError(f"No rows found in {corr_csv}")
 
     series_by_name = {}
     reduced_fixed_ptr_rows = [
@@ -343,10 +434,10 @@ def load_delta_query_data(p128_csv, reduced_csv, selected_model_types=None):
             series_label=architecture_label("reduced"),
         )
 
-    for architecture_key, rows in sorted(p128_rows_by_architecture.items(), key=lambda item: architecture_sort_key(item[0])):
+    for architecture_key, rows in sorted(corr_rows_by_architecture.items(), key=lambda item: architecture_sort_key(item[0])):
         series_by_name[architecture_key] = delta_query_series_from_rows(
             rows,
-            p128_corr_len,
+            corr_len_from_row,
             series_label=architecture_label(architecture_key),
         )
 
@@ -354,16 +445,15 @@ def load_delta_query_data(p128_csv, reduced_csv, selected_model_types=None):
 
 
 def plot_delta_query(
-    p128_csv="queryfree/p128_corrlen_sweep.csv",
-    reduced_csv="queryfree/reduced_effective_compare.csv",
-    output="queryfree/delta_query.png",
-    selected_model_types=None,
-    show_theory=False,
+    corr_csv="saved_data/p128_corrlen_sweep.csv",
+    reduced_csv="saved_data/reduced_effective_compare.csv",
+    output="plots/delta_query.png",
 ):
     try:
         import matplotlib
 
         matplotlib.use("Agg")
+        configure_plot_style(matplotlib)
         import matplotlib.pyplot as plt
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
@@ -372,9 +462,8 @@ def plot_delta_query(
         ) from exc
 
     series_by_name = load_delta_query_data(
-        p128_csv,
+        corr_csv,
         reduced_csv,
-        selected_model_types=selected_model_types,
     )
 
     fig, ax = plt.subplots(figsize=(5, 3.5))
@@ -407,30 +496,66 @@ def plot_delta_query(
         )
 
     all_x_values = sorted(all_x_values)
-    if show_theory:
-        theory_x, theory_delta = compute_theory_delta_query(all_x_values, infer_theory_params(p128_csv))
-        ax.plot(
-            theory_x,
-            theory_delta,
-            marker=None,
-            linewidth=1.6,
-            color=LOCAL_CURVE_STYLES["linear_reduced"],
-            linestyle="--",
-            label="theory",
-            zorder=4,
-        )
+    theory_x, theory_delta = compute_theory_delta_query(all_x_values, infer_theory_params(corr_csv))
+    ax.plot(
+        theory_x,
+        theory_delta,
+        marker=None,
+        linewidth=1.6,
+        color=LOCAL_CURVE_STYLES["linear_reduced"],
+        linestyle="--",
+        label="Theory",
+        zorder=4,
+    )
 
     ax.axhline(0.0, color=SPINE_COLOR, linewidth=1.0, alpha=0.8, zorder=0)
     ax.set_xlabel(r"Correlation length", fontsize=10)
     ax.set_ylabel(r"$\Delta_{\mathrm{query}}$", fontsize=12)
     ax.set_xticks(all_x_values)
     ax.tick_params(axis="both", labelsize=8, color=SPINE_COLOR, labelcolor=SPINE_COLOR)
-    ax.grid(False)
+    ax.set_facecolor(AXES_FACE_COLOR)
+    ax.grid(
+        True,
+        which="major",
+        color=GRID_COLOR,
+        linewidth=1.0,
+        alpha=0.9,
+    )
+    ax.grid(
+        True,
+        which="minor",
+        color=GRID_COLOR,
+        linewidth=0.5,
+        alpha=0.45,
+    )
+    ax.set_axisbelow(True)
     for spine in ax.spines.values():
         spine.set_color(SPINE_COLOR)
         spine.set_linewidth(1.0)
-    ax.legend(loc="upper left", frameon=False, fontsize=8)
-    fig.tight_layout()
+
+    legend_handles, legend_labels = ax.get_legend_handles_labels()
+    handle_by_label = {label: handle for handle, label in zip(legend_handles, legend_labels)}
+    legend_labels_ordered = [
+        "Theory",
+        "Softmax",
+        "Reduced LA",
+        "Softmax+MLP",
+        "Full LA",
+        "Softmax+MLP x4",
+    ]
+    fig.legend(
+        [handle_by_label[label] for label in legend_labels_ordered],
+        legend_labels_ordered,
+        loc="upper center",
+        ncol=3,
+        frameon=False,
+        fontsize=10,
+        columnspacing=1.4,
+        handlelength=2.0,
+        handletextpad=0.5,
+        bbox_to_anchor=(0.5, 1.05),
+    )
+    # fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.78))
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,11 +566,9 @@ def plot_delta_query(
 def main():
     args = parse_args()
     output_path = plot_delta_query(
-        p128_csv=args.p128_csv,
+        corr_csv=args.corr_csv,
         reduced_csv=args.reduced_csv,
         output=args.output,
-        selected_model_types=args.model_type,
-        show_theory=args.theory,
     )
     print(output_path)
 

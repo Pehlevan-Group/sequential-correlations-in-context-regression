@@ -5,6 +5,11 @@ import math
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+THEORY_BASE_DIR = SCRIPT_DIR.parents[1] / "theory_base"
+if THEORY_BASE_DIR.exists() and str(THEORY_BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(THEORY_BASE_DIR))
+
 CORR0_PTR_TO_CORR_LEN = {
     128: 0,
     98: 1,
@@ -26,17 +31,45 @@ MODEL_TITLES = {
     "9": "Softmax attention with MLP",
 }
 
+# CURVE_STYLES = {
+#     "p128": {
+#         "color": "#5E60CE",
+#         "label": r"Correlated tokens + independent query",
+#     },
+#     "corr0": {
+#         "color": "#6FA8DC",
+#         "label": r"Effective context length",
+#     },
+#     "corr_query": {
+#         "color": "#2A9D8F",
+#         "label": r"Correlated tokens + correlated query",
+#     },
+# }
+# CURVE_STYLES = {
+#     "p128": {
+#         "color": "#6C63FF",  # brighter violet
+#         "label": r"Correlated tokens + independent query",
+#     },
+#     "corr0": {
+#         "color": "#45BFD3",  # same cyan as two-column plot
+#         "label": r"Effective $\ell$ surrogate",
+#     },
+#     "corr_query": {
+#         "color": "#55C878",  # same green as two-column plot
+#         "label": r"Correlated tokens + correlated query",
+#     },
+# }
 CURVE_STYLES = {
     "p128": {
-        "color": "#5E60CE",
+        "color": "#6D5DF2",
         "label": r"Correlated tokens + independent query",
     },
     "corr0": {
-        "color": "#6FA8DC",
-        "label": r"Effective $\ell$ surrogate",
+        "color": "#36B6D0",
+        "label": r"Effective context length",
     },
     "corr_query": {
-        "color": "#2A9D8F",
+        "color": "#3FBE73",
         "label": r"Correlated tokens + correlated query",
     },
 }
@@ -44,14 +77,17 @@ LEGEND_ORDER = [
     CURVE_STYLES["p128"]["label"],
     CURVE_STYLES["corr_query"]["label"],
     CURVE_STYLES["corr0"]["label"],
-    "theory",
+    "Theory",
 ]
 
 SPINE_COLOR = "#A1AAB5"
+AXES_FACE_COLOR = "#F7F7F7"
+GRID_COLOR = "white"
 THEORY_COLOR = "#7A7A7A"
 THEORY_ALPHA = 0.45
 EMPIRICAL_FILL_ALPHA = 0.32
 REDUCED_NUM_RUNS = 20
+PLOT_LAYER = 1
 REDUCED_CACHE_FIELDNAMES = [
     "model_type",
     "curve_name",
@@ -75,52 +111,22 @@ def parse_args():
         description="Compare best fresh-test loss against corr_len across two sweep CSVs."
     )
     parser.add_argument(
-        "--p128_csv",
+        "--corr_csv",
         type=str,
         default="saved_data/p128_corrlen_sweep.csv",
-        help="Path to the corr_len sweep CSV with fixed P_tr=128.",
+        help="Path to the correlated-token sweep CSV.",
     )
     parser.add_argument(
-        "--corr0_csv",
+        "--uncorr_csv",
         type=str,
         default="saved_data/corr0_ptr_sweep.csv",
-        help="Path to the effective-sample-size sweep CSV at corr_len=0.",
+        help="Path to the uncorrelated effective-sample-size sweep CSV.",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="queryfree/effective_compare.png",
+        default="plots/compare.pdf",
         help="Output image path.",
-    )
-    parser.add_argument(
-        "--model_type",
-        type=int,
-        nargs="*",
-        default=None,
-        help="Optional model_type values to plot. Default plots all model types present.",
-    )
-    parser.add_argument(
-        "--layer",
-        "--L",
-        dest="layer",
-        type=int,
-        default=1,
-        help="Layer count L to plot. Default plots only L=1 rows.",
-    )
-    parser.add_argument(
-        "--theory",
-        action="store_true",
-        help="Overlay theory curves on the linear-attention subplot.",
-    )
-    parser.add_argument(
-        "--corrquery",
-        action="store_true",
-        help="Include correlated-query (red) curves.",
-    )
-    parser.add_argument(
-        "--reduced",
-        action="store_true",
-        help="Include a reduced-model subplot on the left.",
     )
     parser.add_argument(
         "--reduced_csv",
@@ -142,6 +148,19 @@ def load_rows_if_exists(csv_path):
     if not csv_path.exists():
         return []
     return load_rows(csv_path)
+
+
+def configure_plot_style(matplotlib):
+    matplotlib.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["DejaVu Serif"],
+            "mathtext.fontset": "dejavuserif",
+            "axes.unicode_minus": False,
+            "axes.formatter.use_mathtext": True,
+            "legend.fontsize": 12,
+        }
+    )
 
 
 def best_fresh_test_loss_from_row(row):
@@ -214,20 +233,15 @@ def aggregate_stats_from_sources(source_rows):
     return xs, ys, stds
 
 
-def group_rows_by_model_type(rows, selected_model_types=None):
+def group_rows_by_model_type(rows):
     grouped_rows = {}
-    allowed = None if selected_model_types is None else {str(model_type) for model_type in selected_model_types}
 
     for row in rows:
         model_type = row["model_type"]
-        if allowed is not None and model_type not in allowed:
-            continue
         grouped_rows.setdefault(model_type, []).append(row)
 
     if not grouped_rows:
-        if selected_model_types is None:
-            raise ValueError("No rows found for plotting")
-        raise ValueError(f"No rows found for model_type values {sorted(selected_model_types)}")
+        raise ValueError("No rows found for plotting")
 
     return dict(sorted(grouped_rows.items(), key=lambda item: int(item[0])))
 
@@ -247,45 +261,36 @@ def corr0_effective_corr_len(row):
 
 
 def load_effective_compare_data(
-    p128_csv,
-    corr0_csv,
-    selected_model_types=None,
-    selected_layer=1,
-    include_corrquery=False,
+    corr_csv,
+    uncorr_csv,
 ):
-    p128_rows = filter_rows_by_layer(load_rows(Path(p128_csv)), selected_layer)
-    corr0_rows = filter_rows_by_layer(load_rows(Path(corr0_csv)), selected_layer)
-    p128_false_by_model = group_rows_by_model_type(
-        filter_rows_by_correlated_query(p128_rows, False),
-        selected_model_types,
+    corr_rows = filter_rows_by_layer(load_rows(Path(corr_csv)), PLOT_LAYER)
+    uncorr_rows = filter_rows_by_layer(load_rows(Path(uncorr_csv)), PLOT_LAYER)
+    corr_false_by_model = group_rows_by_model_type(
+        filter_rows_by_correlated_query(corr_rows, False),
     )
-    p128_true_by_model = {}
-    if include_corrquery:
-        p128_true_rows = filter_rows_by_correlated_query(p128_rows, True)
-        p128_true_by_model = group_rows_by_model_type(p128_true_rows, selected_model_types) if p128_true_rows else {}
-    corr0_false_by_model = group_rows_by_model_type(
-        filter_rows_by_correlated_query(corr0_rows, False),
-        selected_model_types,
+    corr_true_rows = filter_rows_by_correlated_query(corr_rows, True)
+    corr_true_by_model = group_rows_by_model_type(corr_true_rows) if corr_true_rows else {}
+    uncorr_false_by_model = group_rows_by_model_type(
+        filter_rows_by_correlated_query(uncorr_rows, False),
     )
 
-    model_types = sorted(set(p128_false_by_model) | set(corr0_false_by_model), key=int)
+    model_types = sorted(set(corr_false_by_model) | set(uncorr_false_by_model), key=int)
     series_by_model = {}
     for model_type in model_types:
-        if model_type not in p128_false_by_model or model_type not in corr0_false_by_model:
+        if model_type not in corr_false_by_model or model_type not in uncorr_false_by_model:
             raise ValueError(
                 f"model_type={model_type} is missing from one of the input CSVs: "
-                f"p128_present={model_type in p128_false_by_model}, corr0_present={model_type in corr0_false_by_model}"
-            )
-        p128_x, p128_y, p128_std = aggregate_stats_by_x(p128_false_by_model[model_type], p128_corr_len)
-        corr0_x, corr0_y, corr0_std = aggregate_stats_by_x(corr0_false_by_model[model_type], corr0_effective_corr_len)
-        corr_query = None
-        if include_corrquery:
-            corr_query = aggregate_stats_from_sources(
-                [
-                    (p128_true_by_model.get(model_type, []), p128_corr_len),
-                ]
-            )
-        theory_row = p128_false_by_model[model_type][0]
+                f"corr_present={model_type in corr_false_by_model}, uncorr_present={model_type in uncorr_false_by_model}"
+        )
+        p128_x, p128_y, p128_std = aggregate_stats_by_x(corr_false_by_model[model_type], p128_corr_len)
+        corr0_x, corr0_y, corr0_std = aggregate_stats_by_x(uncorr_false_by_model[model_type], corr0_effective_corr_len)
+        corr_query = aggregate_stats_from_sources(
+            [
+                (corr_true_by_model.get(model_type, []), p128_corr_len),
+            ]
+        )
+        theory_row = corr_false_by_model[model_type][0]
         series_by_model[model_type] = {
             "p128": (p128_x, p128_y, p128_std),
             "corr0": (corr0_x, corr0_y, corr0_std),
@@ -354,7 +359,7 @@ THEORY_CURVE_STYLE_MAP = {
 }
 
 
-def required_reduced_specs(x_values, theory_params, include_corrquery=False):
+def required_reduced_specs(x_values, theory_params):
     fixed_p_tr = int(round(theory_params["P_tr"]))
     specs = []
     for corr in x_values:
@@ -368,16 +373,15 @@ def required_reduced_specs(x_values, theory_params, include_corrquery=False):
                 "correlated_query": False,
             }
         )
-        if include_corrquery:
-            specs.append(
-                {
-                    "curve_name": "corr_query",
-                    "plot_corr_len": corr,
-                    "corr_len": corr,
-                    "P_tr": fixed_p_tr,
-                    "correlated_query": True,
-                }
-            )
+        specs.append(
+            {
+                "curve_name": "corr_query",
+                "plot_corr_len": corr,
+                "corr_len": corr,
+                "P_tr": fixed_p_tr,
+                "correlated_query": True,
+            }
+        )
         specs.append(
             {
                 "curve_name": "corr0",
@@ -460,7 +464,7 @@ def reduced_cache_needs_upgrade(rows):
     )
 
 
-def load_reduced_panel_data(reduced_csv, x_values, theory_params, include_corrquery=False):
+def load_reduced_panel_data(reduced_csv, x_values, theory_params):
     cached_rows = load_rows_if_exists(reduced_csv)
     if reduced_cache_needs_upgrade(cached_rows):
         cached_rows = []
@@ -471,7 +475,7 @@ def load_reduced_panel_data(reduced_csv, x_values, theory_params, include_corrqu
             continue
         cached_by_key[reduced_cache_key(row)] = row
 
-    specs = required_reduced_specs(x_values, theory_params, include_corrquery=include_corrquery)
+    specs = required_reduced_specs(x_values, theory_params)
     missing_specs = [spec for spec in specs if reduced_spec_key(spec, theory_params) not in cached_by_key]
     if missing_specs:
         try:
@@ -515,7 +519,7 @@ def load_reduced_panel_data(reduced_csv, x_values, theory_params, include_corrqu
         append_reduced_cache_rows(reduced_csv, new_rows)
 
     series = {}
-    for curve_name in ["p128", "corr0"]:
+    for curve_name in ["p128", "corr0", "corr_query"]:
         curve_specs = [spec for spec in specs if spec["curve_name"] == curve_name]
         curve_specs.sort(key=lambda spec: spec["plot_corr_len"])
         xs = [spec["plot_corr_len"] for spec in curve_specs]
@@ -528,21 +532,6 @@ def load_reduced_panel_data(reduced_csv, x_values, theory_params, include_corrqu
             for spec in curve_specs
         ]
         series[curve_name] = (xs, ys, stds)
-    if include_corrquery:
-        curve_specs = [spec for spec in specs if spec["curve_name"] == "corr_query"]
-        curve_specs.sort(key=lambda spec: spec["plot_corr_len"])
-        xs = [spec["plot_corr_len"] for spec in curve_specs]
-        ys = [
-            float(cached_by_key[reduced_spec_key(spec, theory_params)]["best_fresh_test_loss"])
-            for spec in curve_specs
-        ]
-        stds = [
-            float(cached_by_key[reduced_spec_key(spec, theory_params)].get("best_fresh_test_loss_std", 0.0))
-            for spec in curve_specs
-        ]
-        series["corr_query"] = (xs, ys, stds)
-    else:
-        series["corr_query"] = None
 
     if cached_rows == [] and cached_by_key:
         write_reduced_cache_rows(reduced_csv, cached_by_key.values())
@@ -550,20 +539,16 @@ def load_reduced_panel_data(reduced_csv, x_values, theory_params, include_corrqu
 
 
 def plot_effective_compare(
-    p128_csv,
-    corr0_csv,
+    corr_csv,
+    uncorr_csv,
     output,
-    selected_model_types=None,
-    selected_layer=1,
-    show_theory=False,
-    include_corrquery=False,
-    show_reduced=False,
-    reduced_csv="queryfree/reduced_effective_compare.csv",
+    reduced_csv="saved_data/reduced_effective_compare.csv",
 ):
     try:
         import matplotlib
 
         matplotlib.use("Agg")
+        configure_plot_style(matplotlib)
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
     except ModuleNotFoundError as exc:
@@ -573,34 +558,29 @@ def plot_effective_compare(
         ) from exc
 
     series_by_model = load_effective_compare_data(
-        p128_csv,
-        corr0_csv,
-        selected_model_types,
-        selected_layer,
-        include_corrquery=include_corrquery,
+        corr_csv,
+        uncorr_csv,
     )
     output_path = Path(output)
 
     model_types = list(series_by_model.keys())
     panel_specs = []
-    if show_reduced:
-        if "4" not in series_by_model:
-            raise ValueError("--reduced requires model_type=4 data to infer the reduced-model hyperparameters.")
-        reduced_x_values = sorted(CORR_LEN_TO_PTR)
-        reduced_series = load_reduced_panel_data(
-            reduced_csv,
-            reduced_x_values,
-            series_by_model["4"]["theory_params"],
-            include_corrquery=include_corrquery,
-        )
-        panel_specs.append(
-            {
-                "panel_key": "reduced",
-                "title": MODEL_TITLES["reduced"],
-                "series": reduced_series,
-                "theory_params": series_by_model["4"]["theory_params"],
-            }
-        )
+    if "4" not in series_by_model:
+        raise ValueError("The reduced-model panel requires model_type=4 data to infer the hyperparameters.")
+    reduced_x_values = sorted(CORR_LEN_TO_PTR)
+    reduced_series = load_reduced_panel_data(
+        reduced_csv,
+        reduced_x_values,
+        series_by_model["4"]["theory_params"],
+    )
+    panel_specs.append(
+        {
+            "panel_key": "reduced",
+            "title": MODEL_TITLES["reduced"],
+            "series": reduced_series,
+            "theory_params": series_by_model["4"]["theory_params"],
+        }
+    )
     for model_type in model_types:
         panel_specs.append(
             {
@@ -618,7 +598,7 @@ def plot_effective_compare(
     fig, axes = plt.subplots(
         1,
         len(panel_specs),
-        figsize=(12, 3.5) if show_reduced else (8, 3.5),
+        figsize=(12, 3.5),
         sharey=False,
     )
     if len(panel_specs) == 1:
@@ -706,10 +686,7 @@ def plot_effective_compare(
                 legend_handles.append(corr_query_line)
                 legend_labels.append(CURVE_STYLES["corr_query"]["label"])
 
-        theory_on_this_panel = show_theory and (
-            (show_reduced and panel_key == "reduced") #or (panel_key == "4")
-        )
-        if theory_on_this_panel:
+        if panel_key == "reduced":
             theory_curves = compute_theory_curves(all_x_values, panel["theory_params"])
             for theory_name in ["no_query", "effective", "full"]:
                 theory_x, theory_y = theory_curves[theory_name]
@@ -721,7 +698,7 @@ def plot_effective_compare(
                     color=CURVE_STYLES[style_name]["color"],
                     alpha=THEORY_ALPHA,
                     linestyle="--",
-                    label="theory",
+                    label="Theory",
                     zorder=1,
                 )
             legend_handles.append(
@@ -733,13 +710,28 @@ def plot_effective_compare(
                     linewidth=1.5,
                 )
             )
-            legend_labels.append("theory")
+            legend_labels.append("Theory")
 
         ax.set_title(panel["title"], fontsize=10, fontweight="bold")
         ax.set_xlabel(r"Correlation length", fontsize=10)
         ax.set_xticks(all_x_values)
         ax.tick_params(axis="both", labelsize=8, color=SPINE_COLOR, labelcolor=SPINE_COLOR)
-        ax.grid(False)
+        ax.set_facecolor(AXES_FACE_COLOR)
+        ax.grid(
+            True,
+            which="major",
+            color=GRID_COLOR,
+            linewidth=1.0,
+            alpha=0.9,
+        )
+        ax.grid(
+            True,
+            which="minor",
+            color=GRID_COLOR,
+            linewidth=0.5,
+            alpha=0.45,
+        )
+        ax.set_axisbelow(True)
         for spine in ax.spines.values():
             spine.set_color(SPINE_COLOR)
             spine.set_linewidth(1.0)
@@ -767,14 +759,9 @@ def plot_effective_compare(
 def main():
     args = parse_args()
     output_path = plot_effective_compare(
-        args.p128_csv,
-        args.corr0_csv,
+        args.corr_csv,
+        args.uncorr_csv,
         args.output,
-        selected_model_types=args.model_type,
-        selected_layer=args.layer,
-        show_theory=args.theory,
-        include_corrquery=args.corrquery,
-        show_reduced=args.reduced,
         reduced_csv=args.reduced_csv,
     )
     print(output_path)
